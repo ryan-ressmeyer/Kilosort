@@ -495,45 +495,50 @@ class BinaryRWFile:
 
         return tuple(new_idx)
 
-    def padded_batch_to_torch(self, ibatch, return_inds=False):
+    def padded_batch_to_torch(self, ibatch, return_inds=False, debug=False):
         """ read batches from file """
         if self.file is None:
             raise ValueError('Binary file has been closed, data not accessible.')
+        if ibatch >= self.n_batches or ibatch < 0:
+            raise ValueError(f'Batch index {ibatch} is out of bounds. '
+                             f'File has {self.n_batches} batches.')
+        # Shift indices by minimum sample index
+        start = self.imin + (ibatch * self.NT) - self.nt
+        bstart = 0
+        if start < self.imin:
+            bstart += self.imin - start
+            start = self.imin
 
-        if ibatch==0:
-            bstart = self.imin
-            bend = self.imin + self.NT + self.nt
-        else:
-            bstart = self.imin + (ibatch * self.NT) - self.nt
-            bend = min(self.imax, bstart + self.NT + 2*self.nt)
+        # Truncate batch if it goes past the end of the file
+        bsize = self.NT + 2*self.nt
+        end = start + bsize
+        bend = end - start
+        if end > self.imax:
+            bend += self.imax - end
+            end = self.imax
+
+        # Read data
         data = self.file[bstart : bend]
         data = data.T
+
         # Shift data to +/- 2**15
         if self.dtype == 'uint16':
             data = data.astype('float32')
             data = data - 2**15
 
-        nsamp = data.shape[-1]
-        X = torch.zeros((self.n_chan_bin, self.NT + 2*self.nt), device=self.device)
-
+        # Create tensor with padding if necessary
+        X = torch.zeros((self.n_chan_bin, bsize), device=self.device)
         with warnings.catch_warnings():
-            # Don't need this, we know about the warning and it doesn't cause
-            # any problems. Doing this the "correct" way is much slower.
-            warnings.filterwarnings("ignore", message=_torch_warning)
+            warnings.filterwarnings('ignore', _torch_warning)
+            X[:, bstart:bend] = torch.from_numpy(data).to(self.device).float()
+            X[:, :bstart] = X[:, bstart:bstart+1]
+            X[:, bend:] = X[:, bend-1:bend]
 
-            # fix the data at the edges for the first and last batch
-            if ibatch == 0:
-                X[:, self.nt : self.nt+nsamp] = torch.from_numpy(data).to(self.device).float()
-                X[:, :self.nt] = X[:, self.nt : self.nt+1]
-                bstart = self.imin - self.nt
-            elif ibatch == self.n_batches-1:
-                X[:, :nsamp] = torch.from_numpy(data).to(self.device).float()
-                X[:, nsamp:] = X[:, nsamp-1:nsamp]
-                bend += self.nt
-            else:
-                X[:] = torch.from_numpy(data).to(self.device).float()
-    
-        inds = [bstart, bend]
+        # Return
+        inds = [start - bstart, end + (bsize - bend)]
+        if debug:
+            print(f'Loaded batch {ibatch} from {start} to {end} (batch: {bstart} to {bend})')
+            print(inds)
         if return_inds:
             return X, inds
         else:
